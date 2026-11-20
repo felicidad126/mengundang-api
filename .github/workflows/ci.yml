@@ -1,0 +1,136 @@
+name: CI
+
+# Berjalan di setiap push ke branch mana pun. Status ceknya menempel ke commit, jadi pull
+# request dari branch yang sama ikut menampilkan hasilnya. Di main, image yang lolos uji asap
+# diterbitkan ke GHCR; server menjalankannya dengan digest (docs/operasi.md).
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Lint, build, uji
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Uji API memakai PostgreSQL asli, versi sama dengan produksi.
+    services:
+      postgres:
+        image: postgres:18-trixie@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
+        env:
+          POSTGRES_USER: mengundang
+          POSTGRES_PASSWORD: mengundang
+          POSTGRES_DB: mengundang_uji
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mengundang -d mengundang_uji"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      TEST_DATABASE_URL: postgres://mengundang:mengundang@localhost:5432/mengundang_uji
+    steps:
+      # Action dipin ke SHA commit, bukan tag, agar tag yang dipindahkan tidak ikut terpakai.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Versi pnpm dibaca dari "packageManager" di package.json.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Pasang dependensi
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      # Skrip backup, restore, dan penarik backup dijalankan di server dan VM lokal.
+      - name: Lint skrip shell
+        run: shellcheck -x deploy/*.sh deploy/scripts/*.sh deploy/salin-backup/*.sh deploy/postgres/init/*.sh
+
+      - name: Build
+        run: pnpm build
+
+      - name: Uji
+        run: pnpm test
+
+      - name: Uji penarik backup (VM lokal)
+        run: bash deploy/salin-backup/uji-tarik.sh
+
+  # Branch selain main: image dibangun lalu dijalankan dengan compose produksi yang sama seperti
+  # di server (uji asap, pengerasan, backup, latihan restore). Tidak diterbitkan.
+  image:
+    name: Image + uji asap compose produksi
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Bangun image
+        run: docker build -f deploy/Dockerfile -t "mengundang-api:ci-$GITHUB_SHA" .
+
+      # Berkas backup milik root (mode 600), jadi uji asap berjalan dengan sudo.
+      - name: Uji asap, pengerasan, backup, latihan restore
+        run: sudo -E env "MENGUNDANG_IMAGE=mengundang-api:ci-$GITHUB_SHA" bash deploy/uji-asap.sh
+
+  # main: langkah yang sama, lalu image yang PERSIS lolos uji itu diterbitkan ke GHCR.
+  # Hanya job ini yang boleh menulis paket.
+  terbit:
+    name: Image + uji asap + terbit ke GHCR
+    if: github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Bangun image
+        run: |
+          docker build -f deploy/Dockerfile \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -t "mengundang-api:ci-$GITHUB_SHA" .
+
+      - name: Uji asap, pengerasan, backup, latihan restore
+        run: sudo -E env "MENGUNDANG_IMAGE=mengundang-api:ci-$GITHUB_SHA" bash deploy/uji-asap.sh
+
+      - name: Terbitkan ke GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tag="sha-${GITHUB_SHA::12}"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag "mengundang-api:ci-$GITHUB_SHA" "$image:$tag"
+          docker tag "mengundang-api:ci-$GITHUB_SHA" "$image:main"
+          docker push --quiet "$image:$tag"
+          docker push --quiet "$image:main"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image:$tag")
+          docker logout ghcr.io
+          {
+            echo "### Image siap dipasang"
+            echo
+            echo "Isi \`MENGUNDANG_IMAGE\` di \`deploy/produksi.env\` dengan:"
+            echo
+            echo "\`\`\`"
+            echo "$digest"
+            echo "\`\`\`"
+          } >>"$GITHUB_STEP_SUMMARY"
