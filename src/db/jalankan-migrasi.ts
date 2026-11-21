@@ -11,6 +11,15 @@ export interface HasilMigrasi {
   dibatalkan: string[];
 }
 
+export interface OpsiTurun {
+  /** Versi yang akan dibatalkan, disebut persis (pengaman terhadap `down` tanpa sengaja). */
+  konfirmasi?: string;
+  /** Izinkan pembatalan yang ikut menghapus data (lihat Migrasi.dataHilang). */
+  hapusSemuaData?: boolean;
+}
+
+export class MigrasiDitolak extends Error {}
+
 async function versiTerpasang(client: pg.PoolClient): Promise<string[]> {
   const { rows } = await client.query<{ versi: string }>('SELECT versi FROM skema_migrasi ORDER BY versi');
   return rows.map((r) => r.versi);
@@ -18,13 +27,15 @@ async function versiTerpasang(client: pg.PoolClient): Promise<string[]> {
 
 /**
  * `naik`: memasang semua migrasi yang belum terpasang, masing-masing dalam transaksinya sendiri.
- * `turun`: membatalkan satu migrasi terakhir.
+ * `turun`: membatalkan satu migrasi terakhir, hanya bila versinya disebut persis lewat
+ * `opsi.konfirmasi`, dan (bila pembatalan itu menghapus data yang masih ada) `opsi.hapusSemuaData`.
  * Menolak bekerja bila database berisi versi yang tidak dikenal kode ini (database lebih baru).
  */
 export async function jalankanMigrasi(
   pool: pg.Pool,
   arah: Arah,
   daftar: readonly Migrasi[] = MIGRASI,
+  opsi: OpsiTurun = {},
 ): Promise<HasilMigrasi> {
   const client = await pool.connect();
   const hasil: HasilMigrasi = { diterapkan: [], dibatalkan: [] };
@@ -60,13 +71,28 @@ export async function jalankanMigrasi(
       const terakhir = terpasang.at(-1);
       const m = daftar.find((x) => x.versi === terakhir);
       if (m) {
+        if (opsi.konfirmasi !== m.versi) {
+          throw new MigrasiDitolak(
+            `membatalkan ${m.versi} menghapus bagian skema; sebutkan versinya persis: --konfirmasi ${m.versi}`,
+          );
+        }
         await client.query('BEGIN');
         try {
+          if (m.dataHilang) {
+            const { rows } = await client.query<{ n: string | number }>(m.dataHilang);
+            const n = Number(rows[0]?.n ?? 0);
+            if (n > 0 && !opsi.hapusSemuaData) {
+              throw new MigrasiDitolak(
+                `membatalkan ${m.versi} ikut menghapus ${n} baris data; backup dulu, lalu tambahkan --hapus-semua-data bila memang disengaja`,
+              );
+            }
+          }
           await client.query(m.turun);
           await client.query('DELETE FROM skema_migrasi WHERE versi = $1', [m.versi]);
           await client.query('COMMIT');
         } catch (e) {
           await client.query('ROLLBACK');
+          if (e instanceof MigrasiDitolak) throw e;
           throw new Error(`pembatalan ${m.versi} gagal: ${(e as Error).message}`, { cause: e });
         }
         hasil.dibatalkan.push(m.versi);

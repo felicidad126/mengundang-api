@@ -5,6 +5,11 @@ export interface Migrasi {
   versi: string;
   naik: string;
   turun: string;
+  /**
+   * Query yang menghasilkan satu kolom angka: jumlah baris data yang ikut hilang bila migrasi ini
+   * dibatalkan. Bila lebih dari 0, `down` menolak kecuali diberi --hapus-semua-data.
+   */
+  dataHilang?: string;
 }
 
 export const MIGRASI: readonly Migrasi[] = [
@@ -45,6 +50,8 @@ export const MIGRASI: readonly Migrasi[] = [
         CONSTRAINT rsvp_satu_per_perangkat UNIQUE (acara_id, perangkat_id),
         CONSTRAINT rsvp_tidak_hadir_tanpa_jumlah CHECK (kehadiran <> 'tidak' OR jumlah IS NULL)
       );
+      -- Batas RSVP baru per acara per jam dan pembersihan per rentang waktu.
+      CREATE INDEX rsvp_per_acara_waktu ON rsvp (acara_id, dibuat);
 
       CREATE TABLE ucapan (
         id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -55,11 +62,15 @@ export const MIGRASI: readonly Migrasi[] = [
         dibuat timestamptz NOT NULL DEFAULT now()
       );
       CREATE INDEX ucapan_tampil_per_acara ON ucapan (acara_id, id DESC) WHERE tampil;
-      CREATE INDEX ucapan_per_acara ON ucapan (acara_id);
+      -- Batas ucapan per acara per jam, ucapan ganda, dan pembersihan per rentang waktu.
+      CREATE INDEX ucapan_per_acara_waktu ON ucapan (acara_id, dibuat);
 
       GRANT USAGE ON SCHEMA public TO mengundang_app;
       GRANT SELECT ON acara TO mengundang_app;
-      GRANT SELECT, INSERT, UPDATE, DELETE ON rsvp, ucapan TO mengundang_app;
+      -- RSVP diperbarui (kirim ulang dari perangkat yang sama); ucapan tidak pernah diubah API.
+      -- DELETE untuk retensi harian.
+      GRANT SELECT, INSERT, UPDATE, DELETE ON rsvp TO mengundang_app;
+      GRANT SELECT, INSERT, DELETE ON ucapan TO mengundang_app;
     `,
     turun: /* sql */ `
       -- Peran mengundang_app sengaja tidak dihapus: berlaku untuk seluruh server database
@@ -68,6 +79,9 @@ export const MIGRASI: readonly Migrasi[] = [
       DROP TABLE rsvp;
       DROP TABLE acara;
       REVOKE USAGE ON SCHEMA public FROM mengundang_app;
+    `,
+    dataHilang: /* sql */ `
+      SELECT (SELECT count(*) FROM acara) + (SELECT count(*) FROM rsvp) + (SELECT count(*) FROM ucapan) AS n
     `,
   },
 ];
