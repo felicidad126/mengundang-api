@@ -1,5 +1,16 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { aturTampilUcapan, buatAcara, daftarAcara, eksporRsvpCsv, GalatAdmin } from '../src/admin.js';
+import {
+  aturTampilUcapan,
+  aturTampilUcapanRentang,
+  buatAcara,
+  daftarAcara,
+  daftarRsvpAdmin,
+  eksporRsvpCsv,
+  GalatAdmin,
+  hapusAcara,
+  hapusRsvp,
+  hapusRsvpRentang,
+} from '../src/admin.js';
 import { hapusDataKedaluwarsa } from '../src/retensi.js';
 import { acaraUji, kosongkan, PERANGKAT_A, PERANGKAT_B, poolAplikasi, poolPemilik, tanggal } from './bantu.js';
 
@@ -27,6 +38,12 @@ describe('acara:buat', () => {
     expect(a).toMatchObject({ slug: 'laras-bima', nama: 'Laras & Bima', tanggal_acara: '2026-12-12' });
     // 6 Des 00:00 WITA = 5 Des 16:00 UTC
     expect(a.batas_rsvp?.toISOString()).toBe('2026-12-05T16:00:00.000Z');
+  });
+
+  it('tanpa --batas-rsvp, RSVP ditutup di akhir hari tanggal acara menurut zona acara', async () => {
+    const a = await buatAcara(pemilik, { slug: 'tanpa-batas', nama: 'A & B', tanggal: '2026-12-12', zona: 'Asia/Jakarta' });
+    // 13 Des 00:00 WIB = 12 Des 17:00 UTC
+    expect(a.batas_rsvp.toISOString()).toBe('2026-12-12T17:00:00.000Z');
   });
 
   it('menolak slug, tanggal, zona yang salah, dan slug ganda', async () => {
@@ -81,6 +98,71 @@ describe('acara:daftar, rsvp:ekspor, ucapan:sembunyikan', () => {
     expect(await aturTampilUcapan(pemilik, ucapanId, false)).toBe(true);
     expect((await pemilik.query('SELECT tampil FROM ucapan')).rows[0].tampil).toBe(false);
     expect(await aturTampilUcapan(pemilik, ucapanId + 99, false)).toBe(false);
+  });
+});
+
+describe('pembersihan', () => {
+  const rentang = { sejak: '2026-11-20 10:00', sampai: '2026-11-20 11:00', zona: 'Asia/Jakarta' };
+
+  async function isiSpam(id: number) {
+    // 09:30, 10:15, 10:45, 11:30 WIB (= 02:30, 03:15, 03:45, 04:30 UTC)
+    for (const [i, jam] of ['02:30', '03:15', '03:45', '04:30'].entries()) {
+      await pemilik.query(`INSERT INTO ucapan (acara_id, nama, pesan, dibuat) VALUES ($1, 'S', $2, $3)`, [id, `u${i}`, `2026-11-20 ${jam}Z`]);
+      await pemilik.query(
+        `INSERT INTO rsvp (acara_id, perangkat_id, nama, kehadiran, jumlah, dibuat, diperbarui) VALUES ($1, gen_random_uuid(), $2, 'hadir', 10, $3, $3)`,
+        [id, `r${i}`, `2026-11-20 ${jam}Z`],
+      );
+    }
+  }
+
+  it('menyembunyikan dan menampilkan lagi ucapan dalam rentang waktu, hanya acara itu', async () => {
+    const id = await acaraUji(pemilik);
+    const lain = await acaraUji(pemilik, { slug: 'acara-lain' });
+    await isiSpam(id);
+    await isiSpam(lain);
+    expect(await aturTampilUcapanRentang(pemilik, 'laras-bima', rentang, false)).toBe(2);
+    const tampil = await pemilik.query<{ pesan: string }>('SELECT pesan FROM ucapan WHERE acara_id = $1 AND tampil ORDER BY pesan', [id]);
+    expect(tampil.rows.map((r) => r.pesan)).toEqual(['u0', 'u3']);
+    expect((await pemilik.query('SELECT count(*)::int AS n FROM ucapan WHERE acara_id = $1 AND tampil', [lain])).rows[0].n).toBe(4);
+    // Tanpa --sampai: sampai sekarang.
+    expect(await aturTampilUcapanRentang(pemilik, 'laras-bima', { sejak: '2026-11-20', zona: 'Asia/Jakarta' }, false)).toBe(2);
+    expect(await aturTampilUcapanRentang(pemilik, 'laras-bima', { sejak: '2026-11-20', zona: 'Asia/Jakarta' }, true)).toBe(4);
+  });
+
+  it('menghapus RSVP per id dan per rentang (menghitung dulu tanpa --ya)', async () => {
+    const id = await acaraUji(pemilik);
+    await isiSpam(id);
+    expect(await hapusRsvpRentang(pemilik, 'laras-bima', rentang, false)).toEqual({ jumlah: 2, dihapus: false });
+    expect((await daftarRsvpAdmin(pemilik, 'laras-bima')).length).toBe(4);
+    expect(await hapusRsvpRentang(pemilik, 'laras-bima', rentang, true)).toEqual({ jumlah: 2, dihapus: true });
+    const sisa = await daftarRsvpAdmin(pemilik, 'laras-bima');
+    expect(sisa.map((r) => r.nama).sort()).toEqual(['r0', 'r3']);
+    expect(await hapusRsvp(pemilik, sisa[0]!.id)).toBe(true);
+    expect(await hapusRsvp(pemilik, sisa[0]!.id)).toBe(false);
+  });
+
+  it('menolak rentang yang salah', async () => {
+    await acaraUji(pemilik);
+    for (const r of [
+      { sejak: '20-11-2026', zona: 'Asia/Jakarta' },
+      { sejak: '2026-11-20 25:00', zona: 'Asia/Jakarta' },
+      { sejak: '2026-11-20 11:00', sampai: '2026-11-20 10:00', zona: 'Asia/Jakarta' },
+      { sejak: '2026-11-20', zona: 'WIB' },
+    ]) {
+      await expect(aturTampilUcapanRentang(pemilik, 'laras-bima', r, false), JSON.stringify(r)).rejects.toBeInstanceOf(GalatAdmin);
+    }
+  });
+
+  it('acara:hapus wajib konfirmasi slug persis, lalu menghapus RSVP dan ucapannya', async () => {
+    const id = await acaraUji(pemilik);
+    await acaraUji(pemilik, { slug: 'acara-lain' });
+    await isiSpam(id);
+    await expect(hapusAcara(pemilik, 'laras-bima', undefined)).rejects.toThrow('--konfirmasi laras-bima');
+    await expect(hapusAcara(pemilik, 'laras-bima', 'laras')).rejects.toBeInstanceOf(GalatAdmin);
+    expect(await hapusAcara(pemilik, 'laras-bima', 'laras-bima')).toEqual({ rsvp: 4, ucapan: 4 });
+    expect((await pemilik.query('SELECT slug FROM acara')).rows).toEqual([{ slug: 'acara-lain' }]);
+    expect((await pemilik.query('SELECT count(*)::int AS n FROM rsvp')).rows[0].n).toBe(0);
+    await expect(hapusAcara(pemilik, 'tidak-ada', 'tidak-ada')).rejects.toThrow('tidak ditemukan');
   });
 });
 

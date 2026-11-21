@@ -77,6 +77,21 @@ describe('PUT /api/acara/:slug/rsvp', () => {
     expect((await kirim({ perangkat_id: PERANGKAT_A, nama: 'Budi', kehadiran: 'hadir' }, 'tidak-ada')).statusCode).toBe(404);
   });
 
+  it('batas RSVP baru per acara per jam; memperbarui jawaban tetap boleh', async () => {
+    await acaraUji(pemilik);
+    const kecil = aplikasiUji(pool, { batasRsvpBaruPerJam: 2 });
+    const kirimKecil = (perangkat_id: string, kehadiran = 'hadir') =>
+      kecil.inject({ method: 'PUT', url: '/api/acara/laras-bima/rsvp', payload: { perangkat_id, nama: 'Tamu', kehadiran, jumlah: 10 }, headers: { origin: ASAL } });
+    expect((await kirimKecil(PERANGKAT_A)).statusCode).toBe(200);
+    expect((await kirimKecil(PERANGKAT_B)).statusCode).toBe(200);
+    const ditolak = await kirimKecil('00000000-0000-4000-8000-000000000003');
+    expect(ditolak.statusCode).toBe(429);
+    expect(ditolak.json().galat).toBe('terlalu_banyak');
+    expect((await kirimKecil(PERANGKAT_A, 'tidak')).statusCode).toBe(200);
+    expect(await semuaRsvp()).toHaveLength(2);
+    await kecil.close();
+  });
+
   it('pura-pura menerima isian kolom jebakan tanpa menyimpannya', async () => {
     await acaraUji(pemilik);
     const res = await kirim({ perangkat_id: PERANGKAT_A, nama: 'Bot', kehadiran: 'hadir', situs: 'x' });

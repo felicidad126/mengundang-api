@@ -39,7 +39,7 @@ describe('csv', () => {
 describe('konfigurasi', () => {
   const dasar = { MENGUNDANG_ENV: 'production', DATABASE_URL: 'postgres://x', ASAL_DIIZINKAN: 'https://invitation.helonoia.com' };
   it('membaca nilai dan bawaan', () => {
-    expect(bacaKonfigurasi(dasar)).toMatchObject({ port: 3000, retensiHari: 90, asalDiizinkan: ['https://invitation.helonoia.com'] });
+    expect(bacaKonfigurasi(dasar)).toMatchObject({ port: 3000, retensiHari: 90, batasUcapanPerJam: 300, batasRsvpBaruPerJam: 600, asalDiizinkan: ['https://invitation.helonoia.com'] });
   });
   it.each([
     [{ MENGUNDANG_ENV: undefined }],
@@ -49,6 +49,8 @@ describe('konfigurasi', () => {
     [{ ASAL_DIIZINKAN: 'invitation.helonoia.com' }],
     [{ PORT: 'abc' }],
     [{ RETENSI_HARI: '0' }],
+    [{ BATAS_UCAPAN_PER_JAM: '0' }],
+    [{ BATAS_RSVP_BARU_PER_JAM: 'banyak' }],
   ])('menolak %j', (ubah) => {
     expect(() => bacaKonfigurasi({ ...dasar, ...ubah })).toThrow(KonfigurasiSalah);
   });

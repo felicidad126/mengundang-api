@@ -11,9 +11,9 @@ export function urlUji(): string {
 }
 
 /** Pemilik skema (seperti service migrate dan admin). */
-export const poolPemilik = () => buatPool(urlUji(), 2);
+export const poolPemilik = () => buatPool(urlUji(), { max: 2 });
 /** Peran aplikasi, sama dengan service api di server. */
-export const poolAplikasi = () => buatPool(urlUji(), 4, 'mengundang_app');
+export const poolAplikasi = () => buatPool(urlUji(), { max: 4, peran: 'mengundang_app' });
 
 export async function kosongkan(pool: pg.Pool) {
   await pool.query('TRUNCATE acara RESTART IDENTITY CASCADE');
@@ -37,10 +37,17 @@ export async function acaraUji(
   return rows[0]!.id;
 }
 
-export function aplikasiUji(pool: pg.Pool) {
+export function aplikasiUji(pool: pg.Pool, batas: { batasUcapanPerJam?: number; batasRsvpBaruPerJam?: number } = {}) {
   return buatAplikasi({
     pool,
-    konfigurasi: { lingkungan: 'test', logLevel: 'silent', asalDiizinkan: [ASAL], retensiHari: 90 },
+    konfigurasi: {
+      lingkungan: 'test',
+      logLevel: 'silent',
+      asalDiizinkan: [ASAL],
+      retensiHari: 90,
+      batasUcapanPerJam: batas.batasUcapanPerJam ?? 300,
+      batasRsvpBaruPerJam: batas.batasRsvpBaruPerJam ?? 600,
+    },
   });
 }
 

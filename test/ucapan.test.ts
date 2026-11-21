@@ -96,8 +96,42 @@ describe('GET /api/acara/:slug/ucapan', () => {
     expect(Object.keys(hal1.ucapan[0]).sort()).toEqual(['dibuat', 'id', 'nama', 'pesan']);
   });
 
-  it('batas di luar 1–50 ditolak', async () => {
+  it('batas di luar 1–50 dan sebelum di luar bilangan aman ditolak (bukan galat 500)', async () => {
     await acaraUji(pemilik);
     expect((await app.inject({ method: 'GET', url: '/api/acara/laras-bima/ucapan?batas=51' })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: '/api/acara/laras-bima/ucapan?sebelum=1e20' })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'GET', url: `/api/acara/laras-bima/ucapan?sebelum=${Number.MAX_SAFE_INTEGER}` })).statusCode).toBe(200);
+  });
+});
+
+describe('spam', () => {
+  it('ucapan ganda (nama dan isi sama dalam 10 menit) ditolak, isi lain tetap diterima', async () => {
+    await acaraUji(pemilik);
+    expect((await kirim('laras-bima', { nama: 'Budi', pesan: 'Selamat!' })).statusCode).toBe(201);
+    const ganda = await kirim('laras-bima', { nama: ' Budi ', pesan: 'Selamat!  ' });
+    expect(ganda.statusCode).toBe(409);
+    expect(ganda.json().galat).toBe('ucapan_ganda');
+    expect((await kirim('laras-bima', { nama: 'Budi', pesan: 'Selamat lagi!' })).statusCode).toBe(201);
+    await pemilik.query("UPDATE ucapan SET dibuat = now() - interval '11 minutes' WHERE pesan = 'Selamat!'");
+    expect((await kirim('laras-bima', { nama: 'Budi', pesan: 'Selamat!' })).statusCode).toBe(201);
+  });
+
+  it('batas ucapan per acara per jam: 429 ramah dengan Retry-After, acara lain tidak terdampak', async () => {
+    const id = await acaraUji(pemilik);
+    await acaraUji(pemilik, { slug: 'acara-lain' });
+    const kecil = aplikasiUji(pool, { batasUcapanPerJam: 3 });
+    const kirimKecil = (slug: string, pesan: string) =>
+      kecil.inject({ method: 'POST', url: `/api/acara/${slug}/ucapan`, payload: { nama: 'Bot', pesan }, headers: { origin: ASAL } });
+    for (const p of ['a', 'b', 'c']) expect((await kirimKecil('laras-bima', p)).statusCode).toBe(201);
+    const ditolak = await kirimKecil('laras-bima', 'd');
+    expect(ditolak.statusCode).toBe(429);
+    expect(ditolak.json()).toMatchObject({ galat: 'terlalu_banyak' });
+    expect(ditolak.json().pesan).toMatch(/beberapa menit lagi/);
+    expect(ditolak.headers['retry-after']).toBe('600');
+    expect((await kirimKecil('acara-lain', 'a')).statusCode).toBe(201);
+    // Yang sudah lebih dari sejam tidak dihitung lagi.
+    await pemilik.query("UPDATE ucapan SET dibuat = now() - interval '61 minutes' WHERE acara_id = $1", [id]);
+    expect((await kirimKecil('laras-bima', 'e')).statusCode).toBe(201);
+    await kecil.close();
   });
 });
