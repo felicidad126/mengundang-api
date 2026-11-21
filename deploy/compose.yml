@@ -46,8 +46,9 @@ services:
     mem_limit: 512m
     logging: *log
     networks: [dalam]
+    # Lewat TCP, bukan socket unix: socket sudah menjawab saat server sementara init masih berjalan.
     healthcheck:
-      test: [CMD-SHELL, pg_isready -U mengundang -d mengundang]
+      test: [CMD-SHELL, pg_isready -h 127.0.0.1 -U mengundang -d mengundang]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -70,6 +71,8 @@ services:
       DATABASE_URL: postgres://mengundang_app:${MENGUNDANG_APP_DB_PASSWORD:?MENGUNDANG_APP_DB_PASSWORD wajib diisi}@db:5432/mengundang
       ASAL_DIIZINKAN: ${MENGUNDANG_ASAL:?MENGUNDANG_ASAL wajib diisi, mis. https://invitation.helonoia.com}
       RETENSI_HARI: ${MENGUNDANG_RETENSI_HARI:-90}
+      BATAS_UCAPAN_PER_JAM: ${MENGUNDANG_BATAS_UCAPAN_PER_JAM:-300}
+      BATAS_RSVP_BARU_PER_JAM: ${MENGUNDANG_BATAS_RSVP_BARU_PER_JAM:-600}
       TZ: UTC
     # Hanya di 127.0.0.1: diakses lewat nginx di server yang sama (location /api/).
     ports:

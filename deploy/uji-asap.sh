@@ -85,6 +85,17 @@ log "LULUS  ekspor CSV"
   gagal "acara:daftar tidak sesuai"
 log "LULUS  acara:daftar"
 
+log "Pengaman migrasi"
+if "${compose[@]}" run --rm -T migrate node dist/db/migrate.js down >"$work/turun.log" 2>&1; then
+  gagal "migrate down tanpa --konfirmasi seharusnya ditolak"
+fi
+grep -q 'DITOLAK' "$work/turun.log" || gagal "migrate down tanpa --konfirmasi: pesan tidak sesuai: $(cat "$work/turun.log")"
+if "${compose[@]}" run --rm -T migrate node dist/db/migrate.js down --konfirmasi 0001_awal >"$work/turun.log" 2>&1; then
+  gagal "migrate down dengan data seharusnya ditolak tanpa --hapus-semua-data"
+fi
+grep -q 'hapus-semua-data' "$work/turun.log" || gagal "migrate down dengan data: pesan tidak sesuai: $(cat "$work/turun.log")"
+log "LULUS  migrate down ditolak tanpa konfirmasi dan bila masih ada data"
+
 log "Pengerasan"
 terbuka=$("${compose[@]}" port db 5432 2>/dev/null || true)
 [[ -z "$terbuka" || "$terbuka" == ":0" ]] || gagal "port database terbuka ke host: $terbuka"
