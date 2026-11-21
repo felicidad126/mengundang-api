@@ -1,0 +1,144 @@
+# Produksi: menjalankan image yang sudah dibangun dan diuji CI, tidak membangun sendiri.
+#   docker compose --env-file deploy/produksi.env -f deploy/compose.yml up -d --wait
+# Isi deploy/produksi.env dari deploy/produksi.env.example (berkas env tidak pernah masuk git).
+# Perintah admin:
+#   docker compose --env-file deploy/produksi.env -f deploy/compose.yml run --rm admin acara:daftar
+name: mengundang
+
+x-postgres-image: &postgres-image postgres:18-trixie@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
+
+x-log: &log
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+
+# Bagian yang sama untuk semua peran image aplikasi (migrate, api, admin).
+x-aplikasi: &aplikasi
+  image: ${MENGUNDANG_IMAGE:?MENGUNDANG_IMAGE wajib diisi dengan image hasil CI (dengan digest)}
+  pull_policy: missing
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  logging: *log
+  networks: [dalam]
+
+x-url-pemilik: &url-pemilik postgres://mengundang:${MENGUNDANG_DB_PASSWORD:?MENGUNDANG_DB_PASSWORD wajib diisi}@db:5432/mengundang
+
+services:
+  db:
+    image: *postgres-image
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mengundang
+      POSTGRES_PASSWORD: ${MENGUNDANG_DB_PASSWORD:?MENGUNDANG_DB_PASSWORD wajib diisi}
+      POSTGRES_DB: mengundang
+      # Dipakai sekali oleh postgres/init saat database pertama kali dibuat.
+      MENGUNDANG_APP_DB_PASSWORD: ${MENGUNDANG_APP_DB_PASSWORD:?MENGUNDANG_APP_DB_PASSWORD wajib diisi}
+      TZ: UTC
+    # Tanpa port ke host, dan jaringan `dalam` tanpa akses internet.
+    volumes:
+      - db-data:/var/lib/postgresql
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    security_opt: [no-new-privileges:true]
+    shm_size: 128m
+    mem_limit: 512m
+    logging: *log
+    networks: [dalam]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U mengundang -d mengundang]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *aplikasi
+    command: [node, dist/db/migrate.js, up]
+    environment:
+      DATABASE_URL: *url-pemilik
+    mem_limit: 128m
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *aplikasi
+    restart: unless-stopped
+    environment:
+      MENGUNDANG_ENV: production
+      DATABASE_URL: postgres://mengundang_app:${MENGUNDANG_APP_DB_PASSWORD:?MENGUNDANG_APP_DB_PASSWORD wajib diisi}@db:5432/mengundang
+      ASAL_DIIZINKAN: ${MENGUNDANG_ASAL:?MENGUNDANG_ASAL wajib diisi, mis. https://invitation.helonoia.com}
+      RETENSI_HARI: ${MENGUNDANG_RETENSI_HARI:-90}
+      TZ: UTC
+    # Hanya di 127.0.0.1: diakses lewat nginx di server yang sama (location /api/).
+    ports:
+      - 127.0.0.1:${MENGUNDANG_API_PORT:-8090}:3000
+    networks: [dalam, tepi]
+    mem_limit: 256m
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # Perintah admin (acara:buat, rsvp:ekspor, ...). Tidak menyala bersama `up`.
+  admin:
+    <<: *aplikasi
+    profiles: [admin]
+    entrypoint: [node, dist/cli.js]
+    environment:
+      DATABASE_URL: *url-pemilik
+    mem_limit: 128m
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Backup terenkripsi harian (docs/operasi.md). Image sama dengan db (pg_dump, psql, gpg).
+  # Server hanya memegang kunci PUBLIK backup.
+  backup:
+    image: *postgres-image
+    restart: unless-stopped
+    entrypoint: [bash, /scripts/backup-terjadwal.sh]
+    environment:
+      PGHOST: db
+      PGUSER: mengundang
+      PGPASSWORD: ${MENGUNDANG_DB_PASSWORD:?MENGUNDANG_DB_PASSWORD wajib diisi}
+      PGDATABASE: mengundang
+      BACKUP_DIR: /backup
+      BACKUP_PUBLIC_KEY: /kunci/backup-public.asc
+      BACKUP_LABEL: produksi
+      BACKUP_TIME_UTC: ${MENGUNDANG_BACKUP_TIME_UTC:-18:30}
+      BACKUP_RETENTION_DAYS: ${MENGUNDANG_BACKUP_RETENTION_DAYS:-30}
+      # GID grup pembaca backup di host (akun tarik-backup); kosong = hanya root.
+      BACKUP_FILE_GROUP: ${MENGUNDANG_BACKUP_FILE_GROUP:-}
+      TZ: UTC
+    volumes:
+      - ./scripts:/scripts:ro
+      - ${MENGUNDANG_BACKUP_DIR:-./backup}:/backup
+      - ${MENGUNDANG_BACKUP_PUBLIC_KEY:?MENGUNDANG_BACKUP_PUBLIC_KEY wajib diisi (kunci publik backup)}:/kunci/backup-public.asc:ro
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    mem_limit: 256m
+    logging: *log
+    networks: [dalam]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # "unhealthy" bila tidak ada backup dalam 26 jam terakhir.
+    healthcheck:
+      test: [CMD, bash, /scripts/backup-sehat.sh]
+      interval: 5m
+      timeout: 10s
+      retries: 1
+      start_period: 2m
+      start_interval: 5s
+
+networks:
+  # Database dan backup: tanpa akses ke internet maupun host.
+  dalam:
+    internal: true
+  # Hanya untuk port API di 127.0.0.1.
+  tepi: {}
+
+volumes:
+  db-data:

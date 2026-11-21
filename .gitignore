@@ -1,0 +1,18 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.log
+
+# Rahasia dan konfigurasi lokal tidak pernah masuk repo; hanya contoh *.example yang boleh.
+.env
+.env.*
+*.env
+!*.env.example
+# Backup dan kunci backup di server.
+deploy/backup/
+deploy/kunci/
+
+.DS_Store
+.idea/
+.vscode/

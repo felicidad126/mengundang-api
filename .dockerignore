@@ -1,0 +1,16 @@
+# Konteks build image adalah akar repo; kirim hanya yang dibutuhkan untuk build.
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+**/*.log
+.git
+.github
+docs
+plans
+deploy
+test
+*.md
+.env
+.env.*
+*.env
