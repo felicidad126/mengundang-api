@@ -13,6 +13,7 @@ Untuk admin Helonoia yang memasang, merilis, dan merawat API RSVP dan buku ucapa
 | Rahasia | `deploy/produksi.env` (mode 600, tidak pernah masuk git). Kunci **privat** backup tidak pernah di server |
 | Backup | Harian 01:30 WIB, terenkripsi GPG, disimpan 30 hari di `deploy/backup/`; salinan kedua ditarik VM lokal lewat Tailscale |
 | Retensi data tamu | RSVP dan ucapan dihapus otomatis 90 hari setelah tanggal acara |
+| Batas tulis | Per IP di nginx (tulis 10/menit, baca 5/detik) dan per acara per jam di API (300 ucapan baru, 600 RSVP dari perangkat baru; `MENGUNDANG_BATAS_*` di env). Ucapan ganda (nama dan isi sama dalam 10 menit) ditolak |
 
 Semua perintah di bawah dijalankan dari `/opt/mengundang-api` sebagai root, dengan singkatan:
 
@@ -54,7 +55,19 @@ DC="docker compose --env-file deploy/produksi.env -f deploy/compose.yml"
    nano deploy/produksi.env
    ```
 
-3. **Nyalakan**
+3. **Image dari GHCR.** Setelah image terbit pertama kali, pastikan server bisa menariknya tanpa
+   login (paket baru di GHCR bisa privat):
+
+   ```bash
+   docker logout ghcr.io
+   docker pull "$(grep '^MENGUNDANG_IMAGE=' deploy/produksi.env | cut -d= -f2-)"
+   ```
+
+   Bila ditolak (`denied` atau `unauthorized`): di GitHub buka profil **felicidad126 → Packages →
+   mengundang-api → Package settings → Change visibility → Public**, lalu ulangi. Repo-nya publik
+   dan image tidak berisi rahasia. Cukup sekali; versi berikutnya ikut publik.
+
+4. **Nyalakan**
 
    ```bash
    $DC up -d --wait
@@ -62,11 +75,11 @@ DC="docker compose --env-file deploy/produksi.env -f deploy/compose.yml"
    curl -s http://127.0.0.1:8090/api/health    # {"status":"ok"}
    ```
 
-4. **nginx.** Salin [`deploy/nginx/http-mengundang.conf`](../deploy/nginx/http-mengundang.conf) ke
+5. **nginx.** Salin [`deploy/nginx/http-mengundang.conf`](../deploy/nginx/http-mengundang.conf) ke
    `/www/server/panel/vhost/nginx/0.mengundang-api.conf`, dan tambahkan isi
    [`deploy/nginx/lokasi-api.conf`](../deploy/nginx/lokasi-api.conf) ke URL rewrite situs
-   `invitation.helonoia.com` di aaPanel. Lalu `nginx -t && nginx -s reload` dan periksa
-   `curl -s https://invitation.helonoia.com/api/health`.
+   `invitation.helonoia.com` di aaPanel (log akses untuk `/api/` dimatikan di situ). Lalu
+   `nginx -t && nginx -s reload` dan periksa `curl -s https://invitation.helonoia.com/api/health`.
 
 ## Rilis versi baru
 
@@ -83,29 +96,68 @@ DC="docker compose --env-file deploy/produksi.env -f deploy/compose.yml"
    ```
 
 3. Batal rilis: kembalikan `MENGUNDANG_IMAGE` ke digest sebelumnya. Bila rilis itu memasang migrasi
-   baru, jalankan dulu `$DC run --rm migrate node dist/db/migrate.js down` dengan image baru, satu
-   kali per migrasi baru, baru kemudian ganti image.
+   baru, batalkan dulu migrasinya dengan image baru, satu kali per migrasi baru (terbaru dulu), baru
+   kemudian ganti image:
+
+   ```bash
+   $DC run --rm migrate node dist/db/migrate.js down --konfirmasi <versi>   # mis. 0002_...
+   ```
+
+   Versi wajib disebut persis. Bila pembatalan itu ikut menghapus data yang masih ada (mis.
+   `0001_awal` menghapus semua tabel), perintahnya menolak; backup dulu, lalu tambahkan
+   `--hapus-semua-data` hanya bila memang disengaja.
 
 Migrasi tidak pernah berjalan dari aplikasi; selalu lewat service `migrate` sebelum `api` menyala.
 
 ## Perintah admin
 
 ```bash
-# Acara baru. Batas RSVP berlaku sampai akhir hari itu di zona acara (WIB/WITA/WIT).
+# Acara baru. RSVP ditutup di akhir hari --batas-rsvp menurut zona acara (WIB/WITA/WIT);
+# tanpa --batas-rsvp, di akhir hari tanggal acara.
 $DC run --rm admin acara:buat --slug laras-bima --nama "Laras & Bima" \
   --tanggal 2026-12-12 --batas-rsvp 2026-12-05 --zona Asia/Makassar
 # Mencetak tag <meta name="acara" content="laras-bima"> untuk <head> undangan klien.
 
-$DC run --rm admin acara:daftar                                   # rekap semua acara
-$DC run --rm -T admin rsvp:ekspor laras-bima > rsvp-laras-bima.csv # CSV untuk mempelai
-$DC run --rm admin ucapan:daftar laras-bima                       # cari id ucapan
-$DC run --rm admin ucapan:sembunyikan 42                          # sembunyikan ucapan tidak pantas
+$DC run --rm admin acara:daftar                     # rekap semua acara
+$DC run --rm admin rsvp:daftar laras-bima           # id, waktu, kehadiran, jumlah, nama
+$DC run --rm admin ucapan:daftar laras-bima         # id ucapan
+$DC run --rm admin ucapan:sembunyikan 42            # sembunyikan satu ucapan tidak pantas
 $DC run --rm admin ucapan:tampilkan 42
+$DC run --rm admin rsvp:hapus 17                    # hapus satu RSVP palsu
+
+# CSV untuk mempelai. Berisi nomor WhatsApp tamu: dibuat mode 600 (umask 077), kirim hanya ke
+# mempelai, lalu hapus dari server.
+(umask 077 && $DC run --rm -T admin rsvp:ekspor laras-bima > rsvp-laras-bima.csv)
 ```
 
-- CSV memakai UTF-8 dengan BOM (nama tampil benar di Excel) dan sel yang diawali `= + - @` diberi
-  awalan `'` supaya tidak dijalankan sebagai rumus.
-- Berkas CSV berisi nomor WhatsApp tamu: kirim hanya ke mempelai, lalu hapus dari server.
+CSV memakai UTF-8 dengan BOM (nama tampil benar di Excel) dan sel yang diawali `= + - @` diberi
+awalan `'` supaya tidak dijalankan sebagai rumus.
+
+### Membereskan banjir spam
+
+Waktu ditulis `"YYYY-MM-DD HH:MM"` (atau tanggal saja) menurut `--zona`, bawaan `Asia/Jakarta`.
+Tanpa `--sampai`, berarti sampai sekarang.
+
+```bash
+# Lihat kapan spam mulai masuk.
+$DC run --rm admin ucapan:daftar laras-bima
+$DC run --rm admin rsvp:daftar laras-bima
+
+# Sembunyikan semua ucapan dalam rentang itu (bisa ditampilkan lagi dengan ucapan:tampilkan).
+$DC run --rm admin ucapan:sembunyikan --acara laras-bima --sejak "2026-12-01 02:00" --sampai "2026-12-01 03:30"
+
+# RSVP palsu: tanpa --ya hanya menghitung; ulangi dengan --ya untuk menghapus.
+$DC run --rm admin rsvp:hapus --acara laras-bima --sejak "2026-12-01 02:00" --sampai "2026-12-01 03:30"
+$DC run --rm admin rsvp:hapus --acara laras-bima --sejak "2026-12-01 02:00" --sampai "2026-12-01 03:30" --ya
+
+# Acara uji atau acara batal: hapus beserta semua RSVP dan ucapannya. Slug wajib diulang persis.
+$DC run --rm admin acara:hapus uji-coba --konfirmasi uji-coba
+```
+
+Bila banjir masih berlangsung, batas per acara per jam menahannya: setelah 300 ucapan baru atau
+600 RSVP dari perangkat baru dalam satu jam, API menjawab 429 ("coba lagi beberapa menit lagi")
+sampai jumlah dalam satu jam terakhir turun. Untuk acara yang sangat besar, naikkan
+`MENGUNDANG_BATAS_UCAPAN_PER_JAM` / `MENGUNDANG_BATAS_RSVP_BARU_PER_JAM` lalu `$DC up -d --wait api`.
 
 ## Backup dan restore
 
@@ -115,7 +167,7 @@ $DC run --rm admin ucapan:tampilkan 42
 | Isi | `pg_dump` utuh + sidik data per tabel (jumlah baris dan hash) dari snapshot yang sama |
 | Berkas | `deploy/backup/mengundang-produksi-<waktu UTC>.tar.gpg`, mode 640 grup `tarik-backup` (atau 600 bila akun tarik belum dipasang) |
 | Lama simpan | 30 hari; backup lama dihapus hanya setelah backup baru berhasil |
-| Pemantauan | `$DC ps`: service `backup` **healthy** bila ada backup < 26 jam. Log: `$DC logs backup` |
+| Pemantauan | `$DC ps`: service `backup` **healthy** bila ada backup < 26 jam. Log: `$DC logs backup`. Tanda bila gagal: lihat [Tanda bila backup macet](#tanda-bila-backup-macet) |
 
 Backup manual (mis. sebelum rilis): `$DC exec -T backup bash /scripts/backup.sh`.
 
@@ -153,12 +205,33 @@ latihan yang sama di setiap push.
    $DC exec -T db psql -U mengundang -d mengundang <<'SQL'
    GRANT USAGE ON SCHEMA public TO mengundang_app;
    GRANT SELECT ON acara TO mengundang_app;
-   GRANT SELECT, INSERT, UPDATE, DELETE ON rsvp, ucapan TO mengundang_app;
+   GRANT SELECT, INSERT, UPDATE, DELETE ON rsvp TO mengundang_app;
+   GRANT SELECT, INSERT, DELETE ON ucapan TO mengundang_app;
    SQL
    ```
 
 4. `$DC up -d --wait`, periksa `/api/health` dan `acara:daftar`, lalu hapus kunci dari server:
    `shred -u /root/pulih/*`.
+
+### Tanda bila backup macet
+
+Backup yang gagal hanya tercatat di log container, dan status `backup` menjadi **unhealthy**;
+tidak ada yang memberi tahu. Usulan sederhana tanpa layanan pihak ketiga:
+
+1. **Cek harian di server (aaPanel Cron).** Tambahkan tugas Shell Script harian, mis. 09:13 WIB:
+
+   ```bash
+   cd /opt/mengundang-api && BACKUP_DIR=deploy/backup bash deploy/scripts/backup-sehat.sh
+   ```
+
+   Keluar bukan 0 dan menulis `Tidak ada backup dalam 26 jam terakhir` bila backup terbaru lebih
+   tua dari 26 jam; hasilnya terlihat di log tugas Cron aaPanel.
+2. **Cek kedua dari VM lokal.** `tarik-backup.sh` sudah gagal (`GAGAL: backup terbaru lebih tua
+   dari 26 jam`) bila server berhenti membuat backup, tercatat di `/var/log/tarik-backup.log`.
+
+Keduanya baru tercatat, belum dikirim ke siapa pun. Untuk benar-benar memberi tahu (email,
+Telegram, atau notifikasi aaPanel), perlu memilih saluran pihak ketiga; itu keputusan pemilik dan
+belum dipasang.
 
 ## Salinan kedua di VM lokal (model tarik)
 
@@ -185,11 +258,18 @@ perlu kunci privat untuk menyimpannya.
    Akun `tarik-backup` hanya menerima kunci itu, hanya dari alamat Tailscale, dan dikunci
    `rrsync -ro` ke folder backup (tanpa shell, tidak bisa menulis atau menghapus).
 
-4. Di VM lokal: catat sidik host server sekali, pasang skrip dan cron:
+4. Di VM lokal: catat sidik host server sekali, ambil skrip penarik dari repo, pasang skrip dan cron:
 
    ```bash
-   sudo -u tarik ssh-keyscan <nama-tailscale-server> >> /home/tarik/.ssh/known_hosts   # cocokkan dengan ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub di server
-   sudo install -m 755 tarik-backup.sh /usr/local/bin/tarik-backup.sh
+   # Pengalihan >> harus berjalan sebagai tarik, jadi lewat sh -c. Cocokkan sidiknya dengan
+   # `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` di server sebelum lanjut.
+   sudo -u tarik sh -c 'ssh-keyscan -t ed25519 <nama-tailscale-server> >> ~/.ssh/known_hosts'
+   sudo -u tarik ssh-keygen -lf /home/tarik/.ssh/known_hosts
+
+   # Skrip penarik dari repo publik (baca isinya dulu sebelum dipasang).
+   git clone --depth 1 https://github.com/felicidad126/mengundang-api.git /tmp/mengundang-api
+   less /tmp/mengundang-api/deploy/salin-backup/tarik-backup.sh
+   sudo install -m 755 /tmp/mengundang-api/deploy/salin-backup/tarik-backup.sh /usr/local/bin/tarik-backup.sh
    sudo install -d -o tarik -m 700 /srv/backup/mengundang
    echo '17 3 * * * tarik TARIK_SUMBER=tarik-backup@<nama-tailscale-server>:/ TARIK_TUJUAN=/srv/backup/mengundang /usr/local/bin/tarik-backup.sh >> /var/log/tarik-backup.log 2>&1' |
      sudo tee /etc/cron.d/tarik-backup
@@ -201,8 +281,10 @@ perlu kunci privat untuk menyimpannya.
 
 ## Privasi dan retensi
 
-- IP tamu tidak disimpan di database. Log akses nginx (aaPanel) tetap mencatat IP; log container
-  dirotasi (3 × 10 MB per service).
+- API dan database tidak menyimpan IP tamu: log akses nginx untuk `/api/` dimatikan, penolakan batas
+  laju tidak dicatat, dan API hanya melihat alamat nginx (127.0.0.1). Log akses halaman statis situs
+  (`/www/wwwlogs/invitation.helonoia.com.log`) tetap mencatat IP pengunjung, sesuai rotasi log
+  aaPanel. Log container dirotasi (3 × 10 MB per service).
 - RSVP dan nomor WhatsApp hanya bisa dibaca lewat perintah admin. Ucapan bersifat publik untuk tamu
   undangan itu.
 - Setiap hari API menghapus RSVP dan ucapan acara yang tanggalnya lewat lebih dari
