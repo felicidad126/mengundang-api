@@ -13,6 +13,13 @@ export interface Konfigurasi {
   asalDiizinkan: string[];
   /** RSVP dan ucapan dihapus sekian hari setelah tanggal acara. */
   retensiHari: number;
+  /**
+   * Batas tulis per acara per jam (menahan banjir spam yang berganti IP dan isi). Bawaannya
+   * longgar supaya lonjakan tamu asli saat undangan disebar tidak ikut tertolak.
+   */
+  batasUcapanPerJam: number;
+  /** RSVP dari perangkat baru per acara per jam; memperbarui jawaban tidak dihitung. */
+  batasRsvpBaruPerJam: number;
 }
 
 export class KonfigurasiSalah extends Error {}
@@ -56,5 +63,7 @@ export function bacaKonfigurasi(env: NodeJS.ProcessEnv = process.env): Konfigura
     logLevel: env.LOG_LEVEL?.trim() || 'info',
     asalDiizinkan: asal,
     retensiHari: bilangan(env, 'RETENSI_HARI', 90, 1, 3650),
+    batasUcapanPerJam: bilangan(env, 'BATAS_UCAPAN_PER_JAM', 300, 1, 100_000),
+    batasRsvpBaruPerJam: bilangan(env, 'BATAS_RSVP_BARU_PER_JAM', 600, 1, 100_000),
   };
 }

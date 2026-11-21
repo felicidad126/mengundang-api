@@ -8,7 +8,10 @@ import { ruteUcapan } from './rute/ucapan.js';
 
 export interface OpsiAplikasi {
   pool: pg.Pool;
-  konfigurasi: Pick<Konfigurasi, 'lingkungan' | 'logLevel' | 'asalDiizinkan' | 'retensiHari'>;
+  konfigurasi: Pick<
+    Konfigurasi,
+    'lingkungan' | 'logLevel' | 'asalDiizinkan' | 'retensiHari' | 'batasUcapanPerJam' | 'batasRsvpBaruPerJam'
+  >;
 }
 
 const METODE_TULIS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -63,8 +66,8 @@ export function buatAplikasi({ pool, konfigurasi }: OpsiAplikasi): FastifyInstan
   app.register(
     async (api) => {
       await ruteHealth(api, { pool });
-      await ruteUcapan(api, { pool, retensiHari: konfigurasi.retensiHari });
-      await ruteRsvp(api, { pool, retensiHari: konfigurasi.retensiHari });
+      await ruteUcapan(api, { pool, retensiHari: konfigurasi.retensiHari, batasPerJam: konfigurasi.batasUcapanPerJam });
+      await ruteRsvp(api, { pool, retensiHari: konfigurasi.retensiHari, batasBaruPerJam: konfigurasi.batasRsvpBaruPerJam });
     },
     { prefix: '/api' },
   );

@@ -3,27 +3,47 @@
 import { parseArgs } from 'node:util';
 import {
   aturTampilUcapan,
+  aturTampilUcapanRentang,
   buatAcara,
   daftarAcara,
+  daftarRsvpAdmin,
   daftarUcapanAdmin,
   eksporRsvpCsv,
   GalatAdmin,
+  hapusAcara,
+  hapusRsvp,
+  hapusRsvpRentang,
+  type Rentang,
 } from './admin.js';
 import { buatPool } from './db/pool.js';
 
-const BANTUAN = `Perintah:
+const BANTUAN = `Perintah (waktu "YYYY-MM-DD" atau "YYYY-MM-DD HH:MM" menurut --zona, bawaan Asia/Jakarta):
   acara:buat --slug <slug> --nama "<nama>" --tanggal YYYY-MM-DD [--batas-rsvp YYYY-MM-DD] [--zona Asia/Jakarta]
+      tanpa --batas-rsvp, RSVP ditutup di akhir hari tanggal acara
   acara:daftar
-  rsvp:ekspor <slug> [--zona Asia/Jakarta]          CSV ke stdout
+  acara:hapus <slug> --konfirmasi <slug>          hapus acara beserta semua RSVP dan ucapannya
+  rsvp:ekspor <slug> [--zona Asia/Jakarta]        CSV ke stdout (berisi nomor WhatsApp)
+  rsvp:daftar <slug>                              id untuk rsvp:hapus
+  rsvp:hapus <id>
+  rsvp:hapus --acara <slug> --sejak "<waktu>" [--sampai "<waktu>"] [--ya]
+      tanpa --ya hanya menghitung berapa yang akan dihapus
   ucapan:daftar <slug>
   ucapan:sembunyikan <id>
-  ucapan:tampilkan <id>`;
+  ucapan:sembunyikan --acara <slug> --sejak "<waktu>" [--sampai "<waktu>"]
+  ucapan:tampilkan <id>
+  ucapan:tampilkan --acara <slug> --sejak "<waktu>" [--sampai "<waktu>"]`;
 
-const zonaWaktu = (d: Date | null, zona = 'Asia/Jakarta') =>
+const waktuLokal = (d: Date | null, zona = 'Asia/Jakarta') =>
   d ? d.toLocaleString('sv-SE', { timeZone: zona, hour12: false }).slice(0, 16) : '-';
 
-function cetakTabel(header: string[], baris: (string | number)[][]) {
-  console.log([header, ...baris].map((b) => b.join('\t')).join('\n'));
+function cetakTabel(header: string[], baris: (string | number | null)[][]) {
+  console.log([header, ...baris].map((b) => b.map((x) => x ?? '-').join('\t')).join('\n'));
+}
+
+function idDari(teks: string | undefined, apa: string): number {
+  const id = Number(teks);
+  if (!Number.isInteger(id) || id < 1) throw new GalatAdmin(`sebutkan id ${apa} (lihat ${apa}:daftar), atau --acara dengan --sejak`);
+  return id;
 }
 
 async function jalankan(argv: string[]): Promise<number> {
@@ -37,6 +57,11 @@ async function jalankan(argv: string[]): Promise<number> {
       tanggal: { type: 'string' },
       'batas-rsvp': { type: 'string' },
       zona: { type: 'string', default: 'Asia/Jakarta' },
+      acara: { type: 'string' },
+      sejak: { type: 'string' },
+      sampai: { type: 'string' },
+      konfirmasi: { type: 'string' },
+      ya: { type: 'boolean', default: false },
     },
   });
   if (!perintah || perintah === 'bantuan' || perintah === '--help') {
@@ -48,7 +73,15 @@ async function jalankan(argv: string[]): Promise<number> {
     console.error('DATABASE_URL wajib diisi');
     return 2;
   }
-  const pool = buatPool(url, 1);
+  const rentang = (): Rentang | null => {
+    if (values.acara === undefined && values.sejak === undefined && values.sampai === undefined) return null;
+    if (!values.acara || !values.sejak) throw new GalatAdmin('pembersihan per rentang butuh --acara <slug> dan --sejak "<waktu>"');
+    return { sejak: values.sejak, sampai: values.sampai, zona: values.zona };
+  };
+  const keteranganRentang = (r: Rentang) => `${r.sejak} sampai ${r.sampai ?? 'sekarang'}, zona ${r.zona}`;
+
+  // Perintah admin bisa lebih lama daripada permintaan API; batas query lebih longgar.
+  const pool = buatPool(url, { max: 1, batasQueryMs: 60_000 });
   try {
     switch (perintah) {
       case 'acara:buat': {
@@ -60,7 +93,7 @@ async function jalankan(argv: string[]): Promise<number> {
           zona: values.zona,
         });
         console.log(`Acara dibuat: ${a.slug} (${a.nama}), tanggal ${a.tanggal_acara}`);
-        console.log(`Batas RSVP: ${a.batas_rsvp ? `${zonaWaktu(a.batas_rsvp, values.zona)} ${values.zona}` : 'tidak ada'}`);
+        console.log(`RSVP ditutup: ${waktuLokal(a.batas_rsvp, values.zona)} ${values.zona}`);
         console.log(`Tag untuk undangan: <meta name="acara" content="${a.slug}">`);
         return 0;
       }
@@ -68,8 +101,15 @@ async function jalankan(argv: string[]): Promise<number> {
         const daftar = await daftarAcara(pool);
         cetakTabel(
           ['slug', 'nama', 'tanggal', 'batas_rsvp_wib', 'rsvp', 'hadir_orang', 'tidak', 'ragu', 'ucapan'],
-          daftar.map((a) => [a.slug, a.nama, a.tanggal_acara, zonaWaktu(a.batas_rsvp), a.rsvp, a.hadir_orang, a.tidak, a.ragu, a.ucapan]),
+          daftar.map((a) => [a.slug, a.nama, a.tanggal_acara, waktuLokal(a.batas_rsvp), a.rsvp, a.hadir_orang, a.tidak, a.ragu, a.ucapan]),
         );
+        return 0;
+      }
+      case 'acara:hapus': {
+        const slug = positionals[0];
+        if (!slug) throw new GalatAdmin('sebutkan slug acara');
+        const hasil = await hapusAcara(pool, slug, values.konfirmasi);
+        console.log(`Acara ${slug} dihapus, beserta ${hasil.rsvp} RSVP dan ${hasil.ucapan} ucapan`);
         return 0;
       }
       case 'rsvp:ekspor': {
@@ -78,23 +118,56 @@ async function jalankan(argv: string[]): Promise<number> {
         process.stdout.write(await eksporRsvpCsv(pool, slug, values.zona));
         return 0;
       }
+      case 'rsvp:daftar': {
+        const slug = positionals[0];
+        if (!slug) throw new GalatAdmin('sebutkan slug acara');
+        const daftar = await daftarRsvpAdmin(pool, slug);
+        cetakTabel(
+          ['id', 'dibuat_wib', 'kehadiran', 'jumlah', 'nama'],
+          daftar.map((r) => [r.id, waktuLokal(r.dibuat), r.kehadiran, r.jumlah, r.nama]),
+        );
+        return 0;
+      }
+      case 'rsvp:hapus': {
+        const r = rentang();
+        if (!r) {
+          const id = idDari(positionals[0], 'rsvp');
+          if (!(await hapusRsvp(pool, id))) throw new GalatAdmin(`RSVP ${id} tidak ditemukan`);
+          console.log(`RSVP ${id} dihapus`);
+          return 0;
+        }
+        const hasil = await hapusRsvpRentang(pool, values.acara!, r, values.ya);
+        if (!hasil.dihapus) {
+          console.log(`${hasil.jumlah} RSVP acara ${values.acara} masuk dalam rentang ${keteranganRentang(r)}.`);
+          console.log('Belum ada yang dihapus. Ulangi dengan --ya untuk menghapusnya.');
+          return hasil.jumlah > 0 ? 1 : 0;
+        }
+        console.log(`${hasil.jumlah} RSVP acara ${values.acara} dihapus (${keteranganRentang(r)})`);
+        return 0;
+      }
       case 'ucapan:daftar': {
         const slug = positionals[0];
         if (!slug) throw new GalatAdmin('sebutkan slug acara');
         const daftar = await daftarUcapanAdmin(pool, slug);
         cetakTabel(
           ['id', 'tampil', 'dibuat_wib', 'nama', 'pesan'],
-          daftar.map((u) => [u.id, u.tampil ? 'ya' : 'TIDAK', zonaWaktu(u.dibuat), u.nama, u.pesan.replace(/\s+/g, ' ').slice(0, 80)]),
+          daftar.map((u) => [u.id, u.tampil ? 'ya' : 'TIDAK', waktuLokal(u.dibuat), u.nama, u.pesan.replace(/\s+/g, ' ').slice(0, 80)]),
         );
         return 0;
       }
       case 'ucapan:sembunyikan':
       case 'ucapan:tampilkan': {
-        const id = Number(positionals[0]);
-        if (!Number.isInteger(id) || id < 1) throw new GalatAdmin('sebutkan id ucapan (lihat ucapan:daftar)');
         const tampil = perintah === 'ucapan:tampilkan';
-        if (!(await aturTampilUcapan(pool, id, tampil))) throw new GalatAdmin(`ucapan ${id} tidak ditemukan`);
-        console.log(`Ucapan ${id} ${tampil ? 'ditampilkan' : 'disembunyikan'}`);
+        const kata = tampil ? 'ditampilkan' : 'disembunyikan';
+        const r = rentang();
+        if (!r) {
+          const id = idDari(positionals[0], 'ucapan');
+          if (!(await aturTampilUcapan(pool, id, tampil))) throw new GalatAdmin(`ucapan ${id} tidak ditemukan`);
+          console.log(`Ucapan ${id} ${kata}`);
+          return 0;
+        }
+        const n = await aturTampilUcapanRentang(pool, values.acara!, r, tampil);
+        console.log(`${n} ucapan acara ${values.acara} ${kata} (${keteranganRentang(r)})`);
         return 0;
       }
       default:

@@ -19,7 +19,10 @@ export interface AcaraBaru {
   nama: string;
   /** YYYY-MM-DD */
   tanggal: string;
-  /** YYYY-MM-DD; RSVP ditutup setelah hari itu berakhir di zona acara. */
+  /**
+   * YYYY-MM-DD; RSVP ditutup setelah hari itu berakhir di zona acara. Bila kosong, RSVP ditutup
+   * di akhir hari tanggal acara.
+   */
   batasRsvp?: string;
   /** Zona waktu acara, mis. Asia/Jakarta (WIB), Asia/Makassar (WITA), Asia/Jayapura (WIT). */
   zona: string;
@@ -39,11 +42,11 @@ export async function buatAcara(pool: pg.Pool, a: AcaraBaru) {
   }
   await pastikanZona(pool, a.zona);
   try {
-    const { rows } = await pool.query<{ id: number; slug: string; nama: string; tanggal_acara: string; batas_rsvp: Date | null }>(
+    const { rows } = await pool.query<{ id: number; slug: string; nama: string; tanggal_acara: string; batas_rsvp: Date }>(
       `INSERT INTO acara (slug, nama, tanggal_acara, batas_rsvp)
-       VALUES ($1, $2, $3::date, CASE WHEN $4::date IS NULL THEN NULL ELSE ($4::date + 1)::timestamp AT TIME ZONE $5 END)
+       VALUES ($1, $2, $3::date, ($4::date + 1)::timestamp AT TIME ZONE $5)
        RETURNING id, slug, nama, tanggal_acara, batas_rsvp`,
-      [a.slug, a.nama.trim(), a.tanggal, a.batasRsvp ?? null, a.zona],
+      [a.slug, a.nama.trim(), a.tanggal, a.batasRsvp ?? a.tanggal, a.zona],
     );
     return rows[0]!;
   } catch (e) {
@@ -137,4 +140,118 @@ export async function daftarUcapanAdmin(pool: pg.Pool, slug: string) {
 export async function aturTampilUcapan(pool: pg.Pool, id: number, tampil: boolean): Promise<boolean> {
   const { rowCount } = await pool.query('UPDATE ucapan SET tampil = $2 WHERE id = $1', [id, tampil]);
   return (rowCount ?? 0) > 0;
+}
+
+// ---------- Pembersihan per rentang waktu (banjir spam) ----------
+
+const POLA_WAKTU = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/;
+
+export interface Rentang {
+  /** "YYYY-MM-DD" atau "YYYY-MM-DD HH:MM" menurut `zona`; tanggal saja = pukul 00:00. */
+  sejak: string;
+  /** Tidak diisi = sampai sekarang. */
+  sampai?: string;
+  zona: string;
+}
+
+interface RentangUtc {
+  sejak: Date;
+  sampai: Date | null;
+}
+
+/** Mengubah rentang waktu lokal ke UTC dan memeriksanya. */
+async function rentangUtc(pool: pg.Pool, r: Rentang): Promise<RentangUtc> {
+  for (const [nama, nilai] of [['--sejak', r.sejak], ['--sampai', r.sampai]] as const) {
+    if (nilai !== undefined && !POLA_WAKTU.test(nilai)) throw new GalatAdmin(`${nama} harus "YYYY-MM-DD" atau "YYYY-MM-DD HH:MM"`);
+  }
+  await pastikanZona(pool, r.zona);
+  try {
+    const { rows } = await pool.query<{ sejak: Date; sampai: Date | null }>(
+      'SELECT $1::timestamp AT TIME ZONE $3 AS sejak, $2::timestamp AT TIME ZONE $3 AS sampai',
+      [r.sejak, r.sampai ?? null, r.zona],
+    );
+    const hasil = rows[0]!;
+    if (hasil.sampai && hasil.sampai <= hasil.sejak) throw new GalatAdmin('--sampai harus setelah --sejak');
+    return hasil;
+  } catch (e) {
+    const err = e as { code?: string };
+    if (err.code === '22007' || err.code === '22008') throw new GalatAdmin('waktu tidak valid');
+    throw e;
+  }
+}
+
+/** Sembunyikan (atau tampilkan lagi) semua ucapan satu acara yang masuk dalam rentang waktu. */
+export async function aturTampilUcapanRentang(pool: pg.Pool, slug: string, r: Rentang, tampil: boolean): Promise<number> {
+  const id = await idAcara(pool, slug);
+  const { sejak, sampai } = await rentangUtc(pool, r);
+  const { rowCount } = await pool.query(
+    `UPDATE ucapan SET tampil = $4
+      WHERE acara_id = $1 AND dibuat >= $2 AND ($3::timestamptz IS NULL OR dibuat < $3) AND tampil <> $4`,
+    [id, sejak, sampai, tampil],
+  );
+  return rowCount ?? 0;
+}
+
+export async function daftarRsvpAdmin(pool: pg.Pool, slug: string) {
+  const id = await idAcara(pool, slug);
+  const { rows } = await pool.query<{ id: number; nama: string; kehadiran: string; jumlah: number | null; dibuat: Date }>(
+    'SELECT id, nama, kehadiran, jumlah, dibuat FROM rsvp WHERE acara_id = $1 ORDER BY id DESC',
+    [id],
+  );
+  return rows;
+}
+
+/** Mengembalikan false bila RSVP tidak ada. */
+export async function hapusRsvp(pool: pg.Pool, id: number): Promise<boolean> {
+  const { rowCount } = await pool.query('DELETE FROM rsvp WHERE id = $1', [id]);
+  return (rowCount ?? 0) > 0;
+}
+
+/**
+ * RSVP satu acara yang pertama kali masuk dalam rentang waktu. Tanpa `jalankan`, hanya menghitung
+ * (supaya admin melihat dulu berapa yang akan hilang); dengan `jalankan`, menghapusnya.
+ */
+export async function hapusRsvpRentang(
+  pool: pg.Pool,
+  slug: string,
+  r: Rentang,
+  jalankan: boolean,
+): Promise<{ jumlah: number; dihapus: boolean }> {
+  const id = await idAcara(pool, slug);
+  const { sejak, sampai } = await rentangUtc(pool, r);
+  const syarat = 'acara_id = $1 AND dibuat >= $2 AND ($3::timestamptz IS NULL OR dibuat < $3)';
+  if (!jalankan) {
+    const { rows } = await pool.query<{ n: number }>(`SELECT count(*)::int AS n FROM rsvp WHERE ${syarat}`, [id, sejak, sampai]);
+    return { jumlah: rows[0]?.n ?? 0, dihapus: false };
+  }
+  const { rowCount } = await pool.query(`DELETE FROM rsvp WHERE ${syarat}`, [id, sejak, sampai]);
+  return { jumlah: rowCount ?? 0, dihapus: true };
+}
+
+/** Menghapus acara beserta semua RSVP dan ucapannya. `konfirmasi` harus sama persis dengan slug. */
+export async function hapusAcara(pool: pg.Pool, slug: string, konfirmasi: string | undefined) {
+  if (konfirmasi !== slug) {
+    throw new GalatAdmin(`menghapus acara ikut menghapus semua RSVP dan ucapannya; ulangi slug-nya persis: --konfirmasi ${slug}`);
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ id: number; rsvp: number; ucapan: number }>(
+      `SELECT a.id,
+              (SELECT count(*)::int FROM rsvp r WHERE r.acara_id = a.id) AS rsvp,
+              (SELECT count(*)::int FROM ucapan u WHERE u.acara_id = a.id) AS ucapan
+         FROM acara a WHERE a.slug = $1 FOR UPDATE`,
+      [slug],
+    );
+    const a = rows[0];
+    if (!a) throw new GalatAdmin(`acara "${slug}" tidak ditemukan`);
+    await client.query('DELETE FROM acara WHERE id = $1', [a.id]);
+    await client.query('COMMIT');
+    return { rsvp: a.rsvp, ucapan: a.ucapan };
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }
