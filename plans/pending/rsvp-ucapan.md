@@ -101,8 +101,8 @@ Terverifikasi bila: uji API lulus untuk alur normal, validasi, batas waktu, dan 
 Terverifikasi bila: `https://invitation.helonoia.com/api/health` 200 dan port database tidak terbuka.
 
 - **3.1 Stack compose** (S) — `/opt/mengundang-api`: db, migrate, api, backup; env mode 600;
-  container read-only, `no-new-privileges`, `cap_drop: ALL`, batas memori, log berotasi;
-  api hanya di `127.0.0.1:8090`. *Blocked by:* 1.1
+  container aplikasi read-only, bukan root, `cap_drop: ALL`; semua `no-new-privileges`, batas
+  memori, log berotasi; api hanya di `127.0.0.1:8090`. *Blocked by:* 1.1
 - **3.2 nginx** (S) — `location /api/` ke api, `limit_req`, `client_max_body_size 8k`.
   *Verifikasi:* uji beban kecil memicu 429. *Blocked by:* 3.1
 
@@ -152,6 +152,10 @@ memakai acara uji yang dihapus setelahnya).
 | D7 | Backup GPG kunci publik, kunci privat tidak pernah di server | Server dibobol ≠ backup terbaca |
 | D8 | Rilis API manual: ganti digest image di env lalu `up -d --wait` | Migrasi database selalu disengaja, tidak otomatis tiap push |
 | D9 | Salinan kedua ditarik oleh VM lokal (pull), bukan didorong server | Server yang dibobol tidak bisa menghapus atau merusak salinan di VM lokal |
+| D10 | Batas tulis per acara per jam di API (bawaan 300 ucapan, 600 RSVP perangkat baru; env), ucapan ganda 10 menit ditolak, pembersihan per rentang waktu lewat CLI (review PR #1) | Batas per IP saja tidak menahan spam yang berganti IP dan isi; bawaan longgar supaya undangan yang disebar serentak tidak tertolak |
+| D11 | Tanpa `--batas-rsvp`, RSVP ditutup di akhir hari acara (review PR #1) | Sebelumnya terbuka sampai retensi habis (90 hari setelah acara) |
+| D12 | `migrate down` wajib `--konfirmasi <versi>`; bila ikut menghapus data, juga `--hapus-semua-data` (review PR #1) | Satu perintah salah ketik tidak boleh menghapus semua data |
+| D13 | Log akses nginx untuk `/api/` dimatikan, penolakan batas laju tidak dicatat (review PR #1) | API dan database tidak menyimpan IP tamu, dan log nginx `/api/` pun tidak |
 
 ## Belum ditentukan
 
