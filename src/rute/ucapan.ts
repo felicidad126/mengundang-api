@@ -1,12 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { cariAcara, POLA_SLUG } from '../acara.js';
-import { kirimGalat } from '../galat.js';
+import { kirimGalat, kirimTerlaluBanyak } from '../galat.js';
 import { rapikanPesan, rapikanSatuBaris } from '../teks.js';
 
 interface Opsi {
   pool: pg.Pool;
   retensiHari: number;
+  /** Ucapan baru per acara per jam (termasuk yang kemudian disembunyikan). */
+  batasPerJam: number;
 }
 
 const paramsSchema = {
@@ -33,7 +35,7 @@ interface BarisUcapan {
   dibuat: Date;
 }
 
-export async function ruteUcapan(app: FastifyInstance, { pool, retensiHari }: Opsi) {
+export async function ruteUcapan(app: FastifyInstance, { pool, retensiHari, batasPerJam }: Opsi) {
   app.get<{ Params: { slug: string }; Querystring: { sebelum?: number; batas: number } }>(
     '/acara/:slug/ucapan',
     {
@@ -42,7 +44,8 @@ export async function ruteUcapan(app: FastifyInstance, { pool, retensiHari }: Op
         querystring: {
           type: 'object',
           properties: {
-            sebelum: { type: 'integer', minimum: 1 },
+            // Batas atas: angka lebih besar lolos sebagai number tetapi meluap di bigint (galat 500).
+            sebelum: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
             batas: { type: 'integer', minimum: 1, maximum: 50, default: 20 },
           },
         },
@@ -117,6 +120,23 @@ export async function ruteUcapan(app: FastifyInstance, { pool, retensiHari }: Op
         // Bot: jawab seolah berhasil, tetapi tidak disimpan.
         req.log.info('ucapan dari kolom jebakan diabaikan');
         return reply.code(201).send({ ucapan: { id: 0, nama, pesan, dibuat: new Date() } });
+      }
+
+      // Ucapan sejam terakhir di acara ini: untuk batas per jam dan menolak ucapan ganda
+      // (nama dan isi sama dalam 10 menit, mis. kirim dua kali atau bot yang mengulang).
+      const { rows: hitung } = await pool.query<{ sejam: number; ganda: boolean | null }>(
+        `SELECT count(*)::int AS sejam,
+                bool_or(nama = $2 AND pesan = $3 AND dibuat > now() - interval '10 minutes') AS ganda
+           FROM ucapan
+          WHERE acara_id = $1 AND dibuat > now() - interval '1 hour'`,
+        [acara.id, nama, pesan],
+      );
+      if (hitung[0]?.ganda) {
+        return kirimGalat(reply, 409, 'ucapan_ganda', 'Ucapan yang sama baru saja terkirim. Terima kasih!');
+      }
+      if ((hitung[0]?.sejam ?? 0) >= batasPerJam) {
+        req.log.warn({ acara: req.params.slug, batasPerJam }, 'batas ucapan per jam tercapai');
+        return kirimTerlaluBanyak(reply, 'Sedang banyak sekali ucapan untuk undangan ini. Coba lagi beberapa menit lagi.');
       }
 
       const { rows } = await pool.query<BarisUcapan>(

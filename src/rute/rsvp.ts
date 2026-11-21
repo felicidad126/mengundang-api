@@ -1,12 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import type pg from 'pg';
 import { cariAcara, POLA_SLUG } from '../acara.js';
-import { kirimGalat } from '../galat.js';
+import { kirimGalat, kirimTerlaluBanyak } from '../galat.js';
 import { normalisasiTelepon, rapikanPesan, rapikanSatuBaris } from '../teks.js';
 
 interface Opsi {
   pool: pg.Pool;
   retensiHari: number;
+  /** RSVP dari perangkat baru per acara per jam; memperbarui jawaban tidak dihitung. */
+  batasBaruPerJam: number;
 }
 
 type Kehadiran = 'hadir' | 'tidak' | 'ragu';
@@ -23,7 +25,7 @@ interface BodyRsvp {
 
 const POLA_UUID = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$';
 
-export async function ruteRsvp(app: FastifyInstance, { pool, retensiHari }: Opsi) {
+export async function ruteRsvp(app: FastifyInstance, { pool, retensiHari, batasBaruPerJam }: Opsi) {
   // PUT: satu jawaban per perangkat per acara. Mengirim ulang dari HP yang sama memperbarui
   // jawaban sebelumnya, bukan menambah baris baru.
   app.put<{ Params: { slug: string }; Body: BodyRsvp }>(
@@ -93,6 +95,17 @@ export async function ruteRsvp(app: FastifyInstance, { pool, retensiHari }: Opsi
         return { baru: true, rsvp: { nama, kehadiran, jumlah, diperbarui: new Date() } };
       }
 
+      const perangkatId = req.body.perangkat_id.toLowerCase();
+      const { rows: hitung } = await pool.query<{ ada: boolean; sejam: number }>(
+        `SELECT EXISTS (SELECT 1 FROM rsvp WHERE acara_id = $1 AND perangkat_id = $2) AS ada,
+                (SELECT count(*)::int FROM rsvp WHERE acara_id = $1 AND dibuat > now() - interval '1 hour') AS sejam`,
+        [acara.id, perangkatId],
+      );
+      if (!hitung[0]?.ada && (hitung[0]?.sejam ?? 0) >= batasBaruPerJam) {
+        req.log.warn({ acara: req.params.slug, batasBaruPerJam }, 'batas RSVP baru per jam tercapai');
+        return kirimTerlaluBanyak(reply, 'Sedang banyak sekali konfirmasi untuk undangan ini. Coba lagi beberapa menit lagi.');
+      }
+
       const { rows } = await pool.query<{
         nama: string;
         kehadiran: Kehadiran;
@@ -110,7 +123,7 @@ export async function ruteRsvp(app: FastifyInstance, { pool, retensiHari }: Opsi
                pesan = EXCLUDED.pesan,
                diperbarui = now()
          RETURNING nama, kehadiran, jumlah, diperbarui, dibuat = diperbarui AS baru`,
-        [acara.id, req.body.perangkat_id.toLowerCase(), nama, kehadiran, jumlah, telepon, pesan],
+        [acara.id, perangkatId, nama, kehadiran, jumlah, telepon, pesan],
       );
       const baris = rows[0]!;
       return {
