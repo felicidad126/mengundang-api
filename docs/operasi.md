@@ -38,9 +38,12 @@ DC="docker compose --env-file deploy/produksi.env -f deploy/compose.yml"
 
    ```bash
    gpg --quick-gen-key "Mengundang Backup <backup@helonoia.com>" future-default default never
-   gpg --armor --export backup@helonoia.com > mengundang-backup-public.asc
-   gpg --armor --export-secret-keys backup@helonoia.com > mengundang-backup-private.asc
+   gpg --armor --output mengundang-backup-public.asc --export backup@helonoia.com
+   gpg --armor --output mengundang-backup-private.asc --export-secret-keys backup@helonoia.com
    ```
+
+   `--output` dipakai (bukan `>`) karena di PowerShell Windows `>` menyimpan berkas sebagai UTF-16
+   yang tidak bisa dibaca gpg di server. Di Windows, pasang dulu Gpg4win (`winget install -e --id GnuPG.Gpg4win`).
 
    Simpan `mengundang-backup-private.asc` dan passphrase-nya di dua tempat terpisah (mis. password
    manager dan flashdisk). Tanpa kunci privat, backup tidak bisa dibuka oleh siapa pun.
