@@ -1,6 +1,6 @@
 # RSVP dan ucapan tersimpan di server
 
-Status: **disetujui 20 November 2026; fase 1, 2, 4.1, 4.3, 5 selesai di kode** (lihat Progres).
+Status: **disetujui 20 November 2026; fase 1, 2, 3, 4.1, 4.3, 5 selesai; API live sejak 22 November 2026** (lihat Progres).
 Repo kode: `felicidad126/mengundang-api` (baru). Situs: `felicidad126/felicidad126.github.io`.
 
 ## Masalah
@@ -178,10 +178,10 @@ memakai acara uji yang dihapus setelahnya).
 
 | Fase | Status |
 | --- | --- |
-| 0 Prasyarat | 0.1 login GitHub dan 0.2 kunci publik backup menunggu pemilik; 0.3 (VM lokal + Tailscale) nanti |
-| 1 Fondasi | selesai: lint, build, 50 uji API dengan PostgreSQL 18 asli (API diuji dengan hak `mengundang_app`) |
+| 0 Prasyarat | 0.1 selesai. 0.2 kunci publik terpasang 22 November (UID `mimin@helonoia.com`, fingerprint `04F2 73E4 10F8 EDB5 1B9F BBBB 85E0 8927 CD94 CB9C`); pemilik masih perlu memastikan fingerprint ini sama dengan kunci privat di laptop dan menyimpan ekspor privatnya di dua tempat. 0.3 (VM lokal + Tailscale) nanti |
+| 1 Fondasi | selesai: lint, build, 61 uji API dengan PostgreSQL 18 asli (API diuji dengan hak `mengundang_app`) |
 | 2 Ucapan dan RSVP | selesai, termasuk perintah admin dan retensi; uji mutasi menangkap kesalahan retensi dan upsert |
-| 3 Pasang di VM | menunggu image dari CI (butuh repo di GitHub) dan kunci publik backup |
-| 4 Backup dan retensi | 4.1 dan 4.3 selesai; uji asap compose: backup, latihan restore, 11 uji skrip backup lulus; prosedur restore sungguhan dicoba di stack baru (COCOK). 4.2 skrip dan akun siap (9 uji lulus), aktivasi menunggu 0.3 |
+| 3 Pasang di VM | selesai 22 November: `main` `9aba77c`, image `sha256:688f03f6…c80a`, `/api/` aktif di nginx (log akses mati). Uji dari luar lulus: health 200, acara tak ada 404, origin asing 403, body 9 KB 413, RSVP baru lalu diperbarui (satu baris), ucapan ganda 409, kolom jebakan tidak tersimpan; acara `uji-coba` sudah dihapus. Backup pertama `mengundang-produksi-20261122T173218Z.tar.gpg`, service `backup` healthy |
+| 4 Backup dan retensi | 4.1 dan 4.3 selesai; uji asap compose: backup, latihan restore, 11 uji skrip backup lulus; prosedur restore sungguhan dicoba di stack baru (COCOK). 4.2 skrip dan akun siap (9 uji lulus), aktivasi menunggu 0.3. Peringatan backup gagal ditunda ke perencanaan berikutnya |
 | 5 Situs (10 tema) | selesai: 20 uji Playwright (10 tema × demo/klien) + jalur galat lulus; README situs diperbarui |
 | 6 Dokumentasi | `docs/operasi.md` dan README selesai; arsip rencana setelah fase 3 |
